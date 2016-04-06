@@ -1,5 +1,5 @@
 def hash_to_int(h):
-    return h if isinstance(h, int) else int(h, 16)
+    return h if isinstance(h, (int, long)) else int(h, 16)
 
 
 def hashes_to_ints(hs):

@@ -17,7 +17,8 @@ from twisted.python import log
 
 from coinbits.protocol.buffer import ProtocolBuffer
 from coinbits.protocol.serializers import Pong, VerAck, GetData, GetBlocks, GetHeaders
-from coinbits.protocol.serializers import Version, Inventory, GetAddr, MemPool
+from coinbits.protocol.serializers import Version, Inventory, GetAddr, MemPool, AddressVector, IPv4AddressTimestamp
+from coinbits.protocol.serializers import InventoryVector, NotFound
 from coinbits.protocol import fields
 
 from txbitcoin.functools import returner
@@ -47,6 +48,7 @@ class Command(object):
         self.cmdlist = cmdlist
 
     def success(self, value):
+        log.msg('!!!!!!!!!!!!!!!!!{0}'.format(value))
         if self.timeoutCall.active():
             self.timeoutCall.cancel()
         self._deferred.callback(value)
@@ -96,15 +98,16 @@ class BitcoinProtocol(Protocol, TimeoutMixin):
             cmd = self._current.pop(0)
             cmd.fail(reason)
 
-    def send_message(self, message, matchFunc):
+    def send_message(self, message, matchFunc=None):
         if not self._current:
             self.setTimeout(self.persistentTimeOut)
-        log.msg("Sending %s command" % message.command)
+        log.msg("Sending %s command" % message.command.upper())
         binmsg = message.get_message()
         self.transport.write(binmsg)
-        cmd = Command(message, self._current, matchFunc)
-        self._current.append(cmd)
-        return cmd._deferred
+        if matchFunc:
+            cmd = Command(message, self._current, matchFunc)
+            self._current.append(cmd)
+            return cmd._deferred
 
     def dataReceived(self, data):
         self._buffer.write(data)
@@ -114,6 +117,7 @@ class BitcoinProtocol(Protocol, TimeoutMixin):
 
         mname = "handle_%s" % header.command
         cmd = getattr(self, mname, None)
+        #log.msg('Handle {0} command with {2}: {1}'.format(header.command.upper(), message, cmd.__name__ if cmd else 'None'))
         if cmd is None:
             return
 
@@ -124,19 +128,56 @@ class BitcoinProtocol(Protocol, TimeoutMixin):
             self.setTimeout(None)
 
     def handle_version(self, message):
-        binmsg = VerAck().get_message()
-        self.transport.write(binmsg)
+        self.send_message(VerAck())
 
     def handle_ping(self, message):
         pong = Pong()
         pong.nonce = message.nonce
-        binmsg = pong.get_message()
-        self.transport.write(binmsg)
+        self.send_message(pong)
 
     def handle_verack(self, message):
         # our connection isn't ready for messages
         # until after version -> verack exchange
         self.factory.connectionMade()
+        blocks = ["00000000000000000828203cd2abffe91f5bff604fe9dea423acf85aa0576b79"]
+        d = self.getBlockList(blocks)
+        return d
+
+    def handle_inv(self, message):
+        self._generic_handler(message)
+        block_hashes = [inv.inv_hash for inv in message if inv.inv_type == fields.INVENTORY_TYPE['MSG_BLOCK']]
+        if block_hashes:
+            d = self.getBlockData(block_hashes)
+        txn_hashes = [inv.inv_hash for inv in message if inv.inv_type == fields.INVENTORY_TYPE['MSG_TX']]
+        if txn_hashes:
+            d = self.getTxnData(txn_hashes)
+
+    def handle_getaddr(self, message):
+        addrs = AddressVector()
+        for ip in self.factory.pool.peerAddys:
+            addr = IPv4AddressTimestamp()
+            addr.ip_address = ip
+            addrs.addresses.append(addr)
+        self.send_message(addrs)
+
+    def handle_addr(self, message):
+        self._generic_handler(message)
+        self.factory.pool.connect([addr.ip_address for addr in message])
+
+    def handle_getblocks(self, message):
+        self._generic_handler(message)
+        inv = Inventory()
+        inv.inv_type = fields.INVENTORY_TYPE['MSG_BLOCK']
+        inv.inv_hash = 0x00000000000000000828203cd2abffe91f5bff604fe9dea423acf85aa0576b79
+        invs = InventoryVector()
+        invs.inventory = [inv, inv, inv]
+        self.send_message(invs)
+
+    def handle_getdata(self, message):
+        # TODO
+        notfound = NotFound()
+        notfound.inventory = message.inventory
+        self.send_message(notfound)
 
     def _popMatchingCmd(self, message):
         for index, cmd in enumerate(self._current):
@@ -163,16 +204,16 @@ class BitcoinProtocol(Protocol, TimeoutMixin):
         if cmd is not None:
             cmd.success(message)
 
-    handle_inv = _generic_handler
     handle_block = _generic_handler
     handle_tx = _generic_handler
-    handle_addr = _generic_handler
     handle_headers = _generic_handler
 
     def getBlockList(self, blocks):
         def match(msg):
-            size = len(msg.inventory)
-            return msg.command == 'inv' and size > 2 and size <= 500
+            if msg.command == 'inv':
+                size = len(msg.inventory)
+                return size > 2 and size <= 500
+            return False
         blocks = utils.hashes_to_ints(blocks)
         gb = GetBlocks(blocks)
         return self.send_message(gb, match)

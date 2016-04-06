@@ -76,6 +76,7 @@ class BitcoinPool(object):
         self.blacklist = set()
 
     def bootstrap(self):
+        self.listen()
         d = dns.getPeers()
         return d.addCallback(self.connect)
 
@@ -121,6 +122,12 @@ class BitcoinPool(object):
         if len(self) < self.maxsize:
             d.addCallback(impartial(self.getPeers)).addCallbacks(self.connect)
         return d.addCallback(returner(self))
+
+    def listen(self, port=8333):
+        factory = self.factory()
+        factory.pool = self
+        self.factories.append(factory)
+        reactor.listenTCP(port, factory)
 
     def connectionFailed(self, factory):
         log.msg("Connection to %s failed, creating new connection" % factory.addr)
